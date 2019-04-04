@@ -49,39 +49,40 @@ def mp_actions(ids):
 		
 		bin_centre=np.logspace(np.log10(conv_r),np.log10(1),nbins) #logspaced bins to sample from
 		
-		rho_gausst,vel_gausst,bin_centret=fn.phase_gaussian_kernel(pos[:,0],vel,1,bin_centre,masss)
-
-		params,err=curve_fit(pow_l,bin_centre,np.log((vel_gausst[:,0]**3/rho_gausst*len(stack_ids[ids[i]]))**(2/3)))
+		rho_gausst,vel_gausst,bin_centret=fn.phase_square_kernel(pos[:,0],vel,1,conv_r,1,masss)
+		print(conv_r)
+		params,err=curve_fit(pow_l,bin_centret,np.log((vel_gausst**3/rho_gausst*len(stack_ids[ids[i]]))**(2/3)),p0=[3**0.5,1.25],maxfev=100000)
 
 		par[i,:]=params
-		profile[i,:]=(vel_gausst[:,0]**3/rho_gausst*len(stack_ids[ids[i]]))**(2/3)
+		profile[i,:]=(vel_gausst**3/rho_gausst*len(stack_ids[ids[i]]))**(2/3)
 		density[i,:]=rho_gausst/len(stack_ids[ids[i]])
-		vel_disp[i,:]=vel_gausst[:,0]
-		radius[i,:]=bin_centre
+		vel_disp[i,:]=vel_gausst
+		radius[i,:]=bin_centret
 	return(par,profile,density,vel_disp,radius)
 
 	
 
-cross_sections=['z0_high','z1_high','z2_high','z3_high']
-mass_cut=np.array([10**9,10**9,10**9,10**9])
+cross_sections=['CDM_low_norm_bins','CDM_low_high_bins']
+mass_cut=np.array([10**12.5,10**9.5])
 nsnaps=33
-box_size=np.array([25,25,25,25])
+box_size=np.array([100,25])
 num_sims=len(cross_sections)
 location=[]
+location.append('/hpcdata4/arisbrow/simulations/L100N256_WMAP9/DMONLY_SIDM0.0/data')
 location.append('/hpcdata4/sam/PhD/Investigating_Running/RUNS/DMONLY/L025N1024/run_0/data')
-write_loc='/hpcdata4/arisbrow/simulations/L100N256_WMAP9/Processed_data/Entropy_CDM_redshifts/'
+write_loc='/hpcdata4/arisbrow/simulations/L100N256_WMAP9/Processed_data/Entropy_CDM_bin_test/'
 z=np.empty(nsnaps)
 taggs=np.arange(18,34)
 for i in range(len(taggs)):
 	z[i]=E.readAttribute("FOF",location[0],'%03d'%(taggs[i]),"/Header/Redshift")
 	print(taggs[i],z[i])
-tag=np.array([33,27,23,19])
+tag=np.array([34,33])
 
 for j in range(len(tag)):
 	start=time.time()
 	print('Loading data')
-	ind,count,M200,R200,group_pos,part_pos,part_vel,part_mass=fn.loader(location[0],tag[j]) #load data
-	s_fact=E.readAttribute("FOF",location[0],'%03d'%(tag[j]),"/Header/ExpansionFactor")
+	ind,count,M200,R200,group_pos,part_pos,part_vel,part_mass=fn.loader(location[j],tag[j]) #load data
+	s_fact=E.readAttribute("FOF",location[j],'%03d'%(tag[j]),"/Header/ExpansionFactor")
 	print('Read data')
 
 	#sorting arrays to be in order of M200
@@ -147,5 +148,6 @@ for j in range(len(tag)):
 
 	end=time.time()
 	print(end-start)
+	
 	
 	

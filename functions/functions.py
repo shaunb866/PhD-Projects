@@ -3,11 +3,13 @@ import h5py as h5
 import eagle3 as E
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from scipy.stats import binned_statistic
 from functools import partial
 from multiprocessing import Pool
 import multiprocessing as mp
 from tqdm import tqdm
 import time
+import _density_gaussian 
 
 def loader(loc,snap):
 	#funtion to load in gadget data using the read eagle module. Takes the location of the simualtion (loc)
@@ -74,6 +76,7 @@ def stacker(stack_id,part_pos,part_vel,ind,M200,R200,group_pos,count,part_mass,g
 	mass=np.empty(total_num)
 	counter=0
 	conv_rad=np.empty(len(stack_id))
+
 	for i in range(len(stack_id)):
 		group_num=stack_id[i]
 		poss=part_pos[ind[group_num]:ind[group_num]+count[group_num]]
@@ -86,18 +89,20 @@ def stacker(stack_id,part_pos,part_vel,ind,M200,R200,group_pos,count,part_mass,g
 		r_less=np.where(r<r2)
 		rr_less=np.sort(r[r_less])
 
+		v_circ2=6.557*10**(-5)*np.sqrt(m2/r2) #calcualte the circular velocity at R200, only works when m in M_sun and r in Mpc (hs don't matter)
+
 		#calculating convergence radius in r/R200
 		n_less=(np.arange(len(rr_less))+1)
 		m_less=n_less*part_mass
 		rho_rat=m_less/(4/3*np.pi*rr_less**3)*8*np.pi*g/(3*100**2)*10**(-6)
 		n_less[np.where(n_less==1.0)]=2
-		RHS=200**0.5/8*n_less/np.log(n_less)*rho_rat**(-0.5)
+		RHS=n_less/(8*np.log(n_less))*rr_less/r2/(6.557*10**(-5)*np.sqrt(m_less/rr_less)/v_circ2)
 		conv_rad[i]=rr_less[np.nanargmin(np.abs(RHS-0.6))]/r2
 		
 		vel_x=np.mean(vels[:,0][r_less]); vel_y=np.mean(vels[:,1][r_less]); vel_z=np.mean(vels[:,2][r_less])
 		vels[:,0]-=vel_x; vels[:,1]-=vel_y; vels[:,2]-=vel_z
 
-		v_circ2=6.557*10**(-5)*np.sqrt(m2/r2) #calcualte the circular velocity at R200, only works when m in M_sun and r in Mpc (hs don't matter)
+		
 		pos[counter:counter+count[group_num],:]=poss/r2
 		vel[counter:counter+count[group_num],:]=vels/v_circ2
 		mass[counter:counter+count[group_num]]=np.ones(count[group_num])*part_mass/m2
@@ -106,7 +111,7 @@ def stacker(stack_id,part_pos,part_vel,ind,M200,R200,group_pos,count,part_mass,g
 	return(pos,vel,mass,np.max(conv_rad))
 
 #This function need optimising and ideally rewritten in cython
-def phase_gaussian_kernel(r,vel,R200,bin_centre,m):
+def phase_gaussian_kernel_old(r,vel,R200,bin_centre,m):
 	#Function to calculate the density and velocity dispersion profiles of a halo (could be stacke or not) 
 	#a Guassian spline kernel. Width set to contain a constant number of particles and th number set as a function of N200
 	#Inputs are particle radius, r, particle velocities (in the r, theta and phi directions), R200 of the halo,
@@ -118,15 +123,22 @@ def phase_gaussian_kernel(r,vel,R200,bin_centre,m):
 	#m must be an array for the mass of each particle, even if this is just a constant
 	num_p=int(40.0*np.sum(r<R200)**(0.32))
 	num_v=int(1.0*np.sum(r<R200)**(0.8))
-	rr=np.sort(r)
-	try:
-		max_r=rr[np.argmin(np.abs(rr-R200))+np.max(np.array([num_p,num_v]))] #finding how far out we need to cut to still count particles
-	except:
-		max_r=5*R200
-	vel=vel[np.where(r<max_r)]
-	m=m[np.where(r<max_r)]
-	r=r[np.where(r<max_r)]
 
+	num_p=200000
+	num_v=200000
+	rr=np.sort(r)
+	
+	# try:
+	# 	max_r=rr[np.argmin(np.abs(rr-R200))+np.max(np.array([num_p,num_v]))] #finding how far out we need to cut to still count particles
+	# except:
+	# 	max_r=5*R200
+	
+
+	#cutting data to only contain elements needed
+	# vel=vel[np.where(r<=max_r)]
+	# m=m[np.where(r<=max_r)]
+	# r=r[np.where(r<=max_r)]
+	
 	#num_p=int(3.146*np.sum(r<R200)**(0.79))
 	rho=np.empty(len(bin_centre))
 	vel_dd=np.empty((len(bin_centre),3))
@@ -137,7 +149,10 @@ def phase_gaussian_kernel(r,vel,R200,bin_centre,m):
 		dist_sort=dist[sort]
 		vel_sort=vel[sort]
 		m_sort=m[sort]
-		h=dist_sort[num_p-1]
+		if (num_p-1)>=len(dist_sort):
+			h=dist_sort[len(dist_sort)-1]
+		else:
+			h=dist_sort[num_p-1]
 		if h>bin_centre[i]:
 			h=bin_centre[i]
 			nnn=np.sum(dist<h)
@@ -210,6 +225,67 @@ def phase_gaussian_kernel(r,vel,R200,bin_centre,m):
 		
 	return(rho,vel_dd,vel_bulk)
 
+def phase_gaussian_kernel(r,vel,R200,bins,m,sorted=False):
+	#Function to calculate the density and velocity dispersion profiles of a halo (could be stacke or not) 
+	#a Guassian spline kernel. Width set to contain a constant number of particles and th number set as a function of N200
+	#Inputs are particle radius, r, particle velocities (in the r, theta and phi directions), R200 of the halo,
+	#the locations to sample, binc_centre, and the particle masses (which needs to be the same length as r even 
+	#if the values are constant)
+	#
+	#Will return the density, velocity dispersion and bulk velocities of each sampled position
+
+	#m is assumed to be constant here !!!!!!!!! need to make one for variable m (eay to do can't be arsed)
+
+	#This is the cythonised version that is between 2-10 times quicker depending on N200
+	
+	#calculate number of particles to use for the density and velocity dispersion kernels
+	num_p=int(40.0*np.sum(r<R200)**(0.32))
+	num_v=int(1.0*np.sum(r<R200)**(0.8))
+
+	num_p=200000
+	num_v=200000
+
+	print(len(r),len(vel))
+	#apply a few basic checks
+	if len(r)!=len(vel):
+		print('Error: r and vel must be the same length')
+		exit()
+	if np.min(r)>np.min(bins):
+		print('Error: bins must be within the r data range')
+	if np.max(r)<np.max(bins):
+		print('Error: bins must be within the r data range')
+
+	if sorted==False:
+		sort=np.argsort(r)
+		r=r[sort]
+		vel=vel[sort]
+
+	dens,vel_disp=_density_gaussian.dens_calc(r,vel,m,bins,num_p,num_v)
+	return(dens,vel_disp)
+
+def phase_square_kernel(r,vel,R200,min_r,max_r,m,nbins=31):
+	#calcuate density and velocity dispersion in log-binned data
+
+	#cutting data to only include particles within r_in and r_max
+	binss=np.logspace(np.log10(min_r),np.log10(max_r),nbins)
+	bin_loc=np.empty(nbins-1)
+	vol=np.empty(nbins-1)
+	for i in range(nbins-1):
+		vol[i]=4/3*np.pi*(binss[i+1]**3-binss[i]**3)
+		bin_loc[i]=0.5*(binss[i+1]+binss[i])
+
+	cut=(r<max_r) & (r>min_r)
+	r=r[cut]
+	vel=vel[cut]
+	m=m[cut]
+
+	mass,__,__=binned_statistic(r,m,statistic='sum',bins=binss)
+	dens=mass/vol
+	vel_r,__,__=binned_statistic(r,vel[:,0],statistic=np.std,bins=binss)
+
+
+	return(dens,vel_r,bin_loc)
+
 def mass_prof(r,m,bin_centre):
 	#Function to calculate the encosed mass at a set sampled radii, bin_centre using linear interpolation
 	#r is radii of particles and m there correspinding masses
@@ -276,7 +352,7 @@ def radial_profile(pos,group_pos,R_2,h,part_mass,nbin=50,outer_rad=1):
 	rho=dmdr/(4*np.pi*r_sample**2)
 	return(r_sample,rho)
 
-def dens_calc(pos,vel,loc,num_p,part_mass):
+def dens_calc2(pos,vel,loc,num_p,part_mass):
 	dist=((pos[:,0]-loc[0])**2+(pos[:,1]-loc[1])**2+(pos[:,2]-loc[2])**2)**0.5
 	h=np.sort(dist)[num_p]
 	dist_half=dist[dist/h<0.5]/h
